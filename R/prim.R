@@ -13,9 +13,11 @@
 #' @param min.support Minimal size of a box to be valid
 #' @param max.peel Maximal size of a peel, as a fraction. Defaults to 0.1
 #' @param train.fraction Train-test split fraction used in validation, defaults to 0.66
-#' @param max.boxes Optional maximum number of boxes
-#' @param quality.function Optional setting for function to use for determining subset quality, defaults to mean
-#' @param plot Optional setting to plot intermediate results, defaults to false
+#' @param max.boxes Maximum number of boxes, NA or leave out for no limit
+#' @param quality.function Function to use for determining set quality, defaults to mean
+#' @param plot Plot intermediate results, defaults to false
+#' @param minimize Should the quality be minimized? Same as setting the quality function to function(x){-quality.function(x)}. Defaults to FALSE
+#' @param optimal.box During validation, choose the box with the highest quality or a simpler box, two standard errors from the optimum
 #' @return An S3 object of class prim.cover
 #' @author Jurian Baas
 #' @importFrom stats model.frame model.response complete.cases terms
@@ -27,12 +29,28 @@
 #'       data = pima,
 #'       peeling.quantile = 0.05,
 #'       min.support = 0.1,
-#'       plot = TRUE
+#'       plot = TRUE,
+#'       optimal.box = "2se"
 #'   )
+#'
+#'   \donttest{
 #'   summary(p.cov)
 #'   plot(p.cov)
+#'   }
 #' @export
-prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.peel = 0.1, train.fraction = 0.66, max.boxes = NA, quality.function = base::mean, plot = FALSE) {
+prim.cover <- function (
+  formula,
+  data,
+  X, y,
+  peeling.quantile = 0.03,
+  min.support = 0.05,
+  max.peel = 0.1,
+  train.fraction = 0.66,
+  max.boxes = NA,
+  quality.function = base::mean,
+  plot = FALSE,
+  minimize = FALSE,
+  optimal.box = c("best", "2se")) {
 
   using.formula <- missing(X) & missing(y)
 
@@ -68,45 +86,53 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
   if(train.fraction <= 0) stop("Training fraction must be positive")
   if(train.fraction >= 1) stop("Training fraction must be a fraction smaller than 1")
   if(!is.na(max.boxes) & max.boxes <= 0) stop("Maximum boxes must be a positive integer")
-
-  N <- nrow(X) * min.support
-  box.nr <- 1
-  covers <- list()
+  if(length(optimal.box) > 1) optimal.box <- optimal.box[1]
+  if(!optimal.box %in% c("best", "2se")) stop("Invalid optimal box paramter")
+  if(minimize) quality.function <- function(x){-quality.function(x)}
 
   result <- list()
+  class(result) <- "prim.cover"
+
+  result$N <- nrow(X)
   result$peeling.quantile <- peeling.quantile
   result$min.support <- min.support
   result$train.fraction <- train.fraction
   result$quality.function <- quality.function
-  if(!is.na(max.boxes)) result$max.boxes <- max.boxes
-  class(result) <- "prim.cover"
+  result$global.quality <- quality.function(y)
 
-  y.global.quality <- quality.function(y)
-  y.sub.quality <- quality.function(y)
+  if(!is.na(max.boxes)) result$max.boxes <- max.boxes
+
+
+  covers <- list()
+
+  y.sub.quality <- result$global.quality
+  min.N <- result$N * min.support
+  box.nr <- 1
 
   repeat {
+
+    cur.N <- nrow(X)
 
     # In case:
     # The user set a max number of boxes and we reached that limit
     # Current cover has become too small
-    # Current box quality fell below overall quality
-    if((!is.na(max.boxes) & box.nr > max.boxes) | (nrow(X) < N) | y.sub.quality < y.global.quality ) {
-      p.leftover <- list()
-      class(p.leftover) <- "prim.cover.leftover"
-
-      p.leftover$cov.support <- nrow(X)
-      p.leftover$cov.overall.quality <- quality.function(y)
-
-      result$leftover <- p.leftover
-      break
-    }
+    if((!is.na(max.boxes) & box.nr > max.boxes) | (cur.N < min.N)) break
 
     box.nr <- box.nr + 1
 
-    train <- sample(1:nrow(X), nrow(X) * train.fraction)
+    train <- sample(1:cur.N, cur.N * train.fraction)
 
-    p.peel <- prim.peel(X = X[train,], y = y[train], peeling.quantile = peeling.quantile, min.support = min.support, max.peel = max.peel, quality.function = quality.function)
-    p.validate <- prim.validate(p.peel, X[-train,], y[-train])
+    p.peel <- prim.peel(
+      X = X[train,],
+      y = y[train],
+      N = result$N,
+      peeling.quantile = peeling.quantile,
+      min.support = min.support,
+      max.peel = max.peel,
+      quality.function = quality.function
+    )
+    p.peel$global.quality <- quality.function(y[train])
+    p.validate <- prim.validate(p.peel, X[-train,], y[-train], optimal.box)
 
     idx <- prim.rule.match(p.validate, X)
 
@@ -115,10 +141,15 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
       break
     }
 
-    p.validate$cov.support <- nrow(X)
-    p.validate$cov.box.support <- sum(idx)
-    p.validate$cov.overall.quality <- quality.function(y)
-    p.validate$cov.box.quality <- quality.function(y[idx])
+    p.validate$cover.N <- nrow(X)
+    p.validate$cover.box.N <- sum(idx)
+    p.validate$cover.global.quality <- quality.function(y)
+    p.validate$cover.box.quality <- quality.function(y[idx])
+
+    y.sub.quality <- p.validate$cover.box.quality
+
+    # This box does not meet the minimal quality
+    if(y.sub.quality < result$global.quality )  break
 
     if(plot) {
       graphics::par(mfrow = c(1,2))
@@ -126,12 +157,6 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
       graphics::plot(p.validate)
       graphics::par(mfrow = c(1,1))
     }
-
-    y.sub.quality <- p.validate$cov.box.quality
-
-
-    # This box does not meet the minimal quality
-    if(y.sub.quality < y.global.quality )  next
 
     X <- X[!idx,]
     y <- y[!idx]
@@ -142,6 +167,13 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
 
   result$covers <- covers
 
+  # Add the leftover points
+  p.leftover <- list()
+  class(p.leftover) <- "prim.cover.leftover"
+  p.leftover$cover.N <- nrow(X)
+  p.leftover$cover.global.quality <- quality.function(y)
+  result$leftover <- p.leftover
+
   if(using.formula) result$formula <- formula
 
   return(result)
@@ -149,7 +181,7 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
 
 #' @title PRIM diversify strategy
 #' @description Provide a (hopefully) diverse number of box definitions
-#' @details Because the final box depends on the data used, we re-run the PRIM peeling algorithm multiple times, each with a different random train/test split.
+#' @details Because the final box depends on the data used, we re-run the PRIM peeling algorithm multiple times, each with a different random train/test split. Each run is independent from the others, so this algorithm is run in parallel by default.
 #' @param formula Formula with a response and terms
 #' @param data Data frame to find rules in
 #' @param X Optionally instead of using a formula: Data frame to find rules in
@@ -158,27 +190,46 @@ prim.cover <- function(formula, data, X, y, peeling.quantile, min.support, max.p
 #' @param peeling.quantile Quantile to peel off for numerical variables
 #' @param min.support Minimal size of a box to be valid
 #' @param max.peel Maximal size of a peel, as a fraction. Defaults to 0.1
-#' @param train.fraction Optional train-test split fraction used in validation, defaults to 0.66
-#' @param quality.function Optional setting for function to use for determining subset quality, defaults to mean
-#' @param plot Optional setting to plot intermediate results, defaults to false
+#' @param train.fraction Train-test split fraction used in validation, defaults to 0.66
+#' @param quality.function Function to use for determining subset quality, defaults to mean
+#' @param plot Plot intermediate results, defaults to false. Note that intermediate plotting is unavailable when running in parallel
+#' @param parallel Compute each run in parallel, defaults to TRUE. This will use all but one core. Note that intermediate plotting is unavailable when running in parallel
+#' @param minimize Should the quality be minimized? Same as setting the quality function to function(x){-quality.function(x)}. Defaults to FALSE
+#' @param optimal.box During validation, choose the box with the highest quality or a simpler box, two standard errors from the optimum
 #' @return An S3 object of type prim.diversify
 #' @author Jurian Baas
 #' @importFrom stats model.frame model.response complete.cases terms
 #' @importFrom graphics plot par
+#' @importFrom parallel detectCores makeCluster parLapply stopCluster
 #' @examples
 #'   data(ames)
 #'   p.div <- prim.diversify(
 #'       SalePrice ~ . - PID - Order,
 #'       data = ames,
-#'       n = 5,
-#'       peeling.quantile = 0.05,
-#'       min.support = 0.05,
-#'       plot = TRUE
+#'       n = 3,
+#'       plot = TRUE,
+#'       parallel = FALSE,
+#'       optimal.box = "best"
 #'   )
+#'
+#'   \donttest{
 #'   summary(p.div)
 #'   plot(p.div)
+#'   }
 #' @export
-prim.diversify <- function(formula, data, X, y, n, peeling.quantile, min.support, max.peel = 0.1, train.fraction = 0.66, quality.function = base::mean, plot = FALSE) {
+prim.diversify <- function (
+  formula,
+  data,
+  X, y, n,
+  peeling.quantile = 0.03,
+  min.support = 0.05,
+  max.peel = 0.1,
+  train.fraction = 0.66,
+  quality.function = base::mean,
+  plot = FALSE,
+  parallel = TRUE,
+  minimize = FALSE,
+  optimal.box = c("best", "2se")) {
 
   using.formula <- missing(X) & missing(y)
 
@@ -215,6 +266,10 @@ prim.diversify <- function(formula, data, X, y, n, peeling.quantile, min.support
   if(min.support >= 1) stop("Minimum support must be a fraction smaller than 1")
   if(train.fraction <= 0) stop("Training fraction must be positive")
   if(train.fraction >= 1) stop("Training fraction must be a fraction smaller than 1")
+  if(length(optimal.box) > 1) optimal.box <- optimal.box[1]
+  if(!optimal.box %in% c("best", "2se")) stop("Invalid optimal box paramter")
+  if(minimize) quality.function <- function(x){-quality.function(x)}
+  if(plot & parallel) message("Note: Plotting intermediate results is unavailable while running in parallel")
 
   result <- list()
   class(result) <- "prim.diversify"
@@ -226,22 +281,25 @@ prim.diversify <- function(formula, data, X, y, n, peeling.quantile, min.support
   result$train.fraction = train.fraction
   result$quality.function <- quality.function
 
-  result$support <- nrow(X)
-  result$overall.quality <- quality.function(y)
+  result$N <- nrow(X)
+  result$global.quality <- quality.function(y)
 
-  for(i in 1:n) {
-
+  # Define a seperate function so we can use a parallel approach if wanted
+  # but also fall back on a default method
+  peel.and.validate <- function(i) {
     train <- sample(1:nrow(X), nrow(X) * train.fraction)
 
     p.peel <- prim.peel(
       X = X[train,],
       y = y[train],
+      N = result$N,
       peeling.quantile = peeling.quantile,
       min.support = min.support,
       max.peel = max.peel,
       quality.function = quality.function)
+    p.peel$global.quality <- result$global.quality
 
-    p.validate <- prim.validate(p.peel, X[-train,], y[-train])
+    p.validate <- prim.validate(p.peel, X[-train,], y[-train], optimal.box)
 
     if(plot) {
       graphics::par(mfrow = c(1,2))
@@ -252,13 +310,32 @@ prim.diversify <- function(formula, data, X, y, n, peeling.quantile, min.support
 
     idx <- prim.rule.match(p.validate, X)
 
-    p.validate$att.box.support <- sum(idx)
-    p.validate$att.box.quality <- quality.function(y[idx])
+    p.validate$final.box.N <- sum(idx)
+    p.validate$final.box.quality <- quality.function(y[idx])
 
-    attempts <- c(attempts, list(p.validate))
+    return(p.validate)
   }
 
-  result$attempts <- attempts
+  if(parallel) {
+    # Calculate the number of cores
+    nr_cores <- parallel::detectCores() - 1
+
+    # Initiate cluster
+    cl <- parallel::makeCluster(nr_cores)
+
+    result$attempts <- tryCatch({
+      parallel::parLapply(cl, 1:n, peel.and.validate)
+    }, finally = {
+      # Make sure we ALWAYS stop the cluster neatly
+      parallel::stopCluster(cl)
+    })
+
+  } else {
+    # Fall back on the default method
+    result$attempts <- lapply(1:n, peel.and.validate)
+  }
+
+  result$frontier <- quasi.convex.hull(result)
   result$scoreMatrix <- prim.diversify.compare(X, result)
   result$scores <- rowMeans(result$scoreMatrix, na.rm = TRUE)
 
@@ -276,37 +353,45 @@ prim.diversify <- function(formula, data, X, y, n, peeling.quantile, min.support
 #' @description Peeling function for bump hunting using the Patient Rule Induction Method (PRIM).
 #' @param X Data frame to find rules in
 #' @param y Response vector, usually of type numeric
+#' @param N Size of entire data set
 #' @param peeling.quantile Quantile to peel off for numerical variables
 #' @param min.support Minimal size of a box to be valid, as a fraction
 #' @param max.peel Maximal size of a peel, as fraction
-#' @param quality.function Which function to use to determine the quality of a box, defaults to mean
+#' @param quality.function Which function to use to determine the quality of a box
 #' @return An S3 object of class prim.peel
 #' @author Jurian Baas
 #' @importFrom stats model.frame model.response
-prim.peel <- function(X, y, peeling.quantile, min.support, max.peel, quality.function = base::mean) {
+prim.peel <- function(X, y, N, peeling.quantile, min.support, max.peel, quality.function) {
 
   result <- list()
-  result$box.qualities <- quality.function(y)
-  result$supports <- 1
+  result$box.qualities <- numeric()
+  result$supports <- numeric()
 
   result$rule.names <- character()
   result$rule.operators <- character()
   result$rule.types <- character()
   result$rule.values <- list() # A list because we store multiple types of values (i.e. numerical, logical and factors)
   result$quality.function <- quality.function
-  result$peel.support <- nrow(X)
-  result$peel.overall.quality <- quality.function(y)
+  result$N <- N
+  peel.N <- nrow(X)
 
   repeat {
 
-    if(nrow(X) / result$peel.support <= min.support) break
+    if(nrow(X) / N <= min.support) break
 
     # Find box candidates
-    candidates <- prim.candidates.find(X, y, peeling.quantile, min.support, max.peel, result$peel.support, quality.function)
+    candidates <- prim.candidates.find(X, y, peeling.quantile, min.support, max.peel, quality.function)
 
     if(length(candidates) == 0) break
 
-    cf  <- prim.candidates.best(candidates)
+    # Find the candidate with the highest quality and break ties by support
+    max.idx <- order (
+      sapply(candidates, function(c) c$quality),
+      sapply(candidates, function(c) c$support),
+      decreasing = TRUE
+    )[1]
+
+    cf  <- candidates[[max.idx]]
 
     if(cf$type == "factor") {
       cf$value <- paste0("'", cf$value, "'")
@@ -316,7 +401,7 @@ prim.peel <- function(X, y, peeling.quantile, min.support, max.peel, quality.fun
     y <- y[-cf$idx]
 
     result$box.qualities <- c(result$box.qualities, quality.function(y))
-    result$supports <- c(result$supports, length(y) / result$peel.support)
+    result$supports <- c(result$supports, length(y) / peel.N)
 
     result$rule.values <- c(result$rule.values, cf$value)
     result$rule.names <- c(result$rule.names, cf$colname)
@@ -330,7 +415,7 @@ prim.peel <- function(X, y, peeling.quantile, min.support, max.peel, quality.fun
 
   class(result) <- "prim.peel"
 
-  result$superrule <- prim.rule.condense(result)
+  #result$superrule <- prim.rule.condense(result)
   result$call <- match.call()
 
   return(result)
@@ -342,9 +427,10 @@ prim.peel <- function(X, y, peeling.quantile, min.support, max.peel, quality.fun
 #' @param peel.result An S3 object of class prim.peel
 #' @param X A data frame with at least those columns that were used in creating the prim.peel S3 object
 #' @param y Response vector, usually of type numeric
+#' @param optimal.box Choose the box with the highest quality or a simpler box, two standard errors from the optimum
 #' @return An S3 object of type prim.validate
 #' @author Jurian Baas
-prim.validate <- function(peel.result, X, y) {
+prim.validate <- function(peel.result, X, y, optimal.box) {
 
   if(class(peel.result) != "prim.peel") {
     stop("Supplied argument is not of class prim.peel, aborting...")
@@ -354,21 +440,22 @@ prim.validate <- function(peel.result, X, y) {
 
   quality.function <- peel.result$quality.function
 
-  i <- 1
-
   result <- list()
   class(result) <- "prim.validate"
-  result$box.qualities <- quality.function(y)
-  result$supports <- 1
+  result$box.qualities <- numeric()
+  result$supports <- numeric()
   result$redundant <- integer()
   result$rule.names <- character()
   result$rule.operators <- character()
   result$rule.types <- character()
   result$rule.values <- list() # A list because we store multiple types of values (i.e. numerical, logical and factors)
-  result$quality.function <- quality.function
-  result$validate.support <- nrow(X)
-  result$validate.overall.quality <- quality.function(y)
-  result$peel.result <- peel.result
+  result$quality.function <- peel.result$quality.function
+  result$N <- peel.result$N
+  result$global.quality <- peel.result$global.quality
+  result$optimal.box <- optimal.box
+  validate.N <- nrow(X)
+
+  i <- 1
 
   repeat {
 
@@ -392,7 +479,7 @@ prim.validate <- function(peel.result, X, y) {
       y <- y[!idx]
 
       result$box.qualities <- c(result$box.qualities, quality.function(y))
-      result$supports <- c(result$supports, length(y) / result$validate.support)
+      result$supports <- c(result$supports, length(y) / validate.N)
 
       result$rule.values <- c(result$rule.values, rule.info$value)
       result$rule.names <- c(result$rule.names, rule.info$name)
@@ -416,6 +503,7 @@ prim.validate <- function(peel.result, X, y) {
   result$rule.types <- factor(result$rule.types, levels = c("numeric", "logical", "factor"))
 
   result$metrics <- prim.validate.metrics(result)
+  result$best.box.idx <- prim.box.optimal(result)
   result$superrule <- prim.rule.condense(result)
   result$call <- match.call()
 
@@ -430,16 +518,17 @@ prim.validate <- function(peel.result, X, y) {
 #' @param peeling.quantile Quantile to peel off
 #' @param min.support Minimal size of a box
 #' @param max.peel Maximal size of a peel
-#' @param support Support of subset
 #' @param quality.function Function to use to determine box quality
 #' @return A list of potential boxes
 #' @author Jurian Baas
 #' @importFrom stats quantile
-prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, support, quality.function) {
+prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, quality.function) {
 
   i <- 1
   candidates <- list()
   cnames <- colnames(X)
+
+  N <- nrow(X)
 
   repeat {
 
@@ -448,8 +537,6 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
     r <- list()
 
     col <- X[,i]
-
-    col.support <- length(col)
 
     # Do something different depending on data type
     if(is.numeric(col)) {
@@ -465,31 +552,31 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
       left.support <- sum(idx.left)
       right.support <- sum(idx.right)
 
-      left.support.complement <- col.support - left.support
-      right.support.complement <- col.support - right.support
+      left.support.complement <- N - left.support
+      right.support.complement <- N - right.support
 
-      if(left.support > 0 & left.support / support <= max.peel & left.support.complement / support >= min.support) {
-        r[["left"]] <- list (
+      if(left.support > 0 & left.support / N <= max.peel & left.support.complement / N >= min.support) {
+        r <- c(r, list( list (
           value = quantile.left,
           operator = ">=",
           type = "numeric",
           quality = quality.function(y[!idx.left]),
+          support = left.support / N,
           idx = which(idx.left),
-          size = left.support / col.support,
           colname = cnames[i]
-        )
+        )))
       }
 
-      if(right.support > 0 & right.support / support <= max.peel  & right.support.complement / support >= min.support) {
-        r[["right"]] <- list (
+      if(right.support > 0 & right.support / N <= max.peel  & right.support.complement / N >= min.support) {
+        r <- c(r, list( list (
           value = quantile.right,
           operator = "<=",
           type = "numeric",
           quality = quality.function(y[!idx.right]),
+          support = right.support / N,
           idx = which(idx.right),
-          size = right.support / col.support,
           colname = cnames[i]
-        )
+        )))
       }
 
     } else if (is.logical(col)  ) {
@@ -503,27 +590,27 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
         support.true <- sum(col)
         support.false <- sum(!col)
 
-        if(support.true / support <= max.peel & support.false / support >= min.support) {
-          r[["true"]] <- list (
+        if(support.true / N <= max.peel & support.false / N >= min.support) {
+          r <- c(r, list( list (
             value = FALSE,
             operator = "==",
             type = "logical",
             quality = quality.function(y[!idx.true]),
+            support = support.true / N,
             idx = which(idx.true),
-            size = sum(idx.true) / col.support,
             colname = cnames[i]
-          )
+          )))
         }
-        if(support.false / support <= max.peel & support.true / support >= min.support) {
-          r[["false"]] <- list (
+        if(support.false / N <= max.peel & support.true / N >= min.support) {
+          r <- c(r, list( list (
             value = TRUE,
             operator = "==",
             type = "logical",
             quality = quality.function(y[!idx.false]),
+            support = support.false / N,
             idx = which(idx.false),
-            size = sum(idx.false) / col.support,
             colname = cnames[i]
-          )
+          )))
         }
       }
 
@@ -544,18 +631,18 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
 
         if(support.lvl > 0) {
 
-          support.lvl.complement <- col.support - support.lvl
+          support.lvl.complement <- N - support.lvl
 
-          if(support.lvl / support <= max.peel & support.lvl.complement / support >= min.support) {
-            r[[lvl]] <- list (
+          if(support.lvl / N <= max.peel & support.lvl.complement / N >= min.support) {
+            r <- c(r, list( list (
               value = lvl,
               operator = "!=",
               type = "factor",
               quality = quality.function(y[!idx]),
+              support = support.lvl / N,
               idx = which(idx),
-              size = support.lvl / col.support,
               colname = cnames[i]
-            )
+            )))
           }
 
         }
@@ -568,7 +655,7 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
 
 
     if(length(r) > 0) {
-      candidates[[cnames[i]]] <- r
+      candidates <- c(candidates, r)
     }
 
     i <- i + 1
@@ -578,36 +665,34 @@ prim.candidates.find <- function(X, y, peeling.quantile, min.support, max.peel, 
   return(candidates)
 }
 
-#' @title Find optimal box candidate
-#' @description This function goes through the box candidate qualities and finds the optimal candidate
-#' @param candidates List of candidate generated by prim.candidates.find()
-#' @return A list with the optimal candidate information
+
+#' @title Find the optimal box depending on the strategy
+#' @description Finds the box with the highest quality or the box closest to the maximum quality minus 2 times the standard error
+#' @param prim.validate An object of type "prim.validate"
 #' @author Jurian Baas
-prim.candidates.best <- function(candidates) {
+#' @importFrom utils tail
+#' @return The index of the optimal box
+prim.box.optimal <- function(prim.validate) {
 
-  qualities <- sapply(candidates, function(col) {
-    sapply(col, function(x) x$quality)
-  })
+  if(class(prim.validate) != "prim.validate")
+    stop("Argument is not of class prim.validate")
 
-  candidate.best <- NULL
-  quality.max <- NA
-
-  # Find the best candidate by linear search
-  for(i in 1:length(qualities)) {
-
-    col <- qualities[[i]]
-
-    for(j in 1:length(col)) {
-
-      if(is.na(quality.max) | col[j] > quality.max) {
-
-        quality.max <- col[j]
-        candidate.best <- candidates[[i]][[j]]
-
-      }
-    }
+  if(prim.validate$optimal.box == "best") {
+    best.box.idx <- which.max(prim.validate$box.qualities)
+  } else {
+    best.box.idx <- which.max(prim.validate$box.qualities)
+    # Find the ordering of boxes leading up and including the best box
+    o <- order(prim.validate$box.qualities[1:best.box.idx])
+    # The new optimal is 2 standard errors below the maximum
+    new.optimal <- utils::tail(prim.validate$box.qualities[o], n = 1) - (2 * prim.validate$metrics$se)
+    # Find the box which is closest to this new optimal
+    cutoff.point <- o[which.min(abs(prim.validate$box.qualities[o] - new.optimal))]
+    # There could be another point close by with a better quality
+    # So we pick the optimal in the subset defined by the new best box
+    best.box.idx <- which.max(prim.validate$box.qualities[1:cutoff.point])
   }
-  return(candidate.best)
+
+  return(best.box.idx)
 }
 
 #' @title Create box matching index
@@ -630,27 +715,23 @@ prim.rule.match <- function(prim.object, X) {
 #' @title Condense multiple (redundant) rules
 #' @details This function condenses the many (redundant) rules of an S3 object of class prim.peel or prim.validate to a single rule.
 #' @description This function condenses the many (redundant) rules of an S3 object of class prim.peel or prim.validate to a single rule.
-#' @param prim.object An S3 object of class prim.peel or prim.validate
+#' @param prim.object An S3 object of class prim.validate
 #' @return The condensed rule as a single string
 #' @author Jurian Baas
 #' @importFrom stats aggregate
 prim.rule.condense <- function(prim.object) {
 
-  supported.classes <- c("prim.peel", "prim.validate")
-
-  if(!class(prim.object) %in% supported.classes) {
-    stop("Supplied argument is not of class prim.peel or prim.validate, aborting...")
-  }
+  if(class(prim.object) != "prim.validate") stop("Supplied argument is not of class prim.validate")
 
   # Search for the rules leading up to the best box
-  rule.idx <- 1:(which.max(prim.object$box.qualities) - 1 )
+  rule.idx <- 1:prim.object$best.box.idx
 
   # Combine the lists into a single data frame
   rules <- data.frame (
     name = factor(prim.object$rule.names[rule.idx]),
     operator = factor(prim.object$rule.operators[rule.idx]),
     value = as.character(prim.object$rule.values[rule.idx]),
-    quality = prim.object$box.qualities[rule.idx],
+    #quality = prim.object$box.qualities[rule.idx],
     type = prim.object$rule.types[rule.idx]
   )
 
@@ -660,7 +741,7 @@ prim.rule.condense <- function(prim.object) {
 
     numerical.rules <- rules[numerical.rules.idx,1:3]
 
-    numerical.rules <- aggregate(
+    numerical.rules <- stats::aggregate (
       list(value = numerical.rules$value),
       list(name = numerical.rules$name, operator = numerical.rules$operator),
       function(x) rev(x)[1])
@@ -684,13 +765,7 @@ prim.rule.condense <- function(prim.object) {
 #' @param operation One of {"union", "intersect"}
 #' @author Jurian Baas
 #' @return Logical vector, true iff all rules evaluate to TRUE for a certain observation
-prim.rule.operations <- function(X, prim.objects, operation) {
-
-  supported.operations <-  list("union", "intersect")
-
-  if(!operation %in% supported.operations) {
-    stop("Not a valid operation")
-  }
+prim.rule.operations <- function(X, prim.objects, operation = c("union", "intersect")) {
 
   supported.classes <- c("prim.peel", "prim.validate")
   used.classes <- sapply(prim.objects, class)
@@ -710,7 +785,6 @@ prim.rule.operations <- function(X, prim.objects, operation) {
     matches <- apply(matches, 1, all)
   }
 
-
   return(matches)
 }
 
@@ -727,14 +801,17 @@ prim.diversify.compare <- function(X, p.div) {
   if(class(p.div) != "prim.diversify")
     stop("Argument is not of class prim.diversify")
 
-  nr.of.attempts <- length(p.div$attempts)
+  frontier <- sort(p.div$frontier)
+  nr.of.attempts <- length(frontier)
   idx <- combn(1:nr.of.attempts, 2)
   scores <- apply(idx, 2, function(i) {
-    sum(prim.rule.operations(X, p.div$attempts[i], "intersect")) / sum(prim.rule.operations(X, p.div$attempts[i], "union"))
+    sum(prim.rule.operations(X, p.div$attempts[frontier[i]], "intersect")) / sum(prim.rule.operations(X, p.div$attempts[frontier[i]], "union"))
   })
   m <- matrix(ncol = nr.of.attempts, nrow = nr.of.attempts)
   m[t(idx)] <- scores
   m[t(idx[ nrow(idx):1, ])] <- scores
+  colnames(m) <- frontier
+  rownames(m) <- frontier
   return(m)
 }
 
@@ -751,16 +828,20 @@ prim.validate.metrics <- function(prim.validate) {
 
   # Name it x for clearer code
   x <- prim.validate$box.qualities
+  n <- length(x)
 
-  result <- list()
-  result$mu <- mean(x)
-  result$sd <- stats::sd(x)
+  metrics <- list()
+
+  # Calculate sample standard deviation
+  ssd <-  sqrt(sum((x - mean(x))^2) / (n - 1))
+
   # Calculate standard error of the mean
-  result$se <- result$sd / sqrt( length(x) )
-  # Calcualte 95% confidence intervals
-  result$ci <- c(result$mu - 2 * result$se, result$mu + 2 * result$se)
+  metrics$se <- ssd / sqrt(n)
+  # Calculate standard deviation of sample mean
+  metrics$sd <- stats::sd(x) / sqrt(n)
 
-  return(result)
+
+  return(metrics)
 }
 
 
@@ -791,12 +872,12 @@ predict.prim.cover <- function(object, newdata, ... ) {
 
     idx <- prim.rule.match(cover, newdata)
 
-    y.hat[idx & is.na(y.hat)] <- cover$cov.box.quality
+    y.hat[idx & is.na(y.hat)] <- cover$cover.box.quality
 
     i <- i + 1
   }
 
-  y.hat[is.na(y.hat)] <- object$leftover$cov.overall.quality
+  y.hat[is.na(y.hat)] <- object$leftover$cover.global.quality
 
   return(y.hat)
 }
@@ -818,27 +899,46 @@ predict.prim.cover <- function(object, newdata, ... ) {
 #' @export
 #' @importFrom graphics par plot points text
 plot.prim.peel <- function(x, ...) {
+
+  best.box.idx <- which.max(x$box.qualities)
+
   graphics::par(bty = "l")
   graphics::plot (
-    x$supports,
-    x$box.qualities,
+    c(1, x$supports),
+    c(x$global.quality, x$box.qualities),
     xlim = c(1, 0),
     type = "n",
     xlab = "Support", ylab = "Box quality",
     main = "PRIM peel result",
     ...)
   graphics::lines (
-    x$supports,
-    x$box.qualities
+    c(1, x$supports),
+    c(x$global.quality, x$box.qualities)
   )
   graphics::points (
-    x$supports,
-    x$box.qualities,
+    c(1, x$supports[1:best.box.idx]),
+    c(x$global.quality, x$box.qualities[1:best.box.idx]),
     col= "royalblue4", pch = 19, cex = 1, lty = "solid", lwd = 2)
+  graphics::points (
+    x$supports[-(1:best.box.idx)],
+    x$box.qualities[-(1:best.box.idx)],
+    col= "royalblue2", pch = 4, cex = 1, lty = "solid", lwd = 2)
+
+  print.names <- character(length = best.box.idx)
+
+  for(i in 1:(best.box.idx-1)) {
+    if(x$rule.names[i] == x$rule.names[i + 1]) {
+      print.names[i] <- ""
+    } else {
+      print.names[i] <- paste(x$rule.names[i], x$rule.operators[i], x$rule.values[i])
+    }
+  }
+  print.names[best.box.idx] <- paste(x$rule.names[best.box.idx], x$rule.operators[best.box.idx], x$rule.values[best.box.idx])
+
   graphics::text (
-    x$supports,
-    x$box.qualities,
-    labels = c("", paste(x$rule.names, x$rule.operators, x$rule.values) ),
+    c(1, x$supports[1:best.box.idx]),
+    c(x$global.quality, x$box.qualities[1:best.box.idx]),
+    labels = c("", print.names),
     cex = 0.7, pos = 2, col = "orangered4", font = 2)
 }
 
@@ -851,38 +951,52 @@ plot.prim.peel <- function(x, ...) {
 #' @export
 #' @importFrom graphics par plot points text
 plot.prim.validate <- function(x, ...) {
+
+  best.box.idx <- x$best.box.idx
+
   graphics::par(bty = "l")
 
   graphics::plot (
-    x$supports,
-    x$box.qualities,
+    c(1, x$supports),
+    c(x$global.quality, x$box.qualities),
     xlim = c(1, 0),
     type = "n",
     xlab = "Support", ylab = "Box quality",
     main = "PRIM validate result",
     ...)
 
-  #graphics::rect(
-  #  xleft = x$supports[which.max(x$box.qualities)] - 2*x$metrics$se,
-  #  ybottom = -1e6,
-  #  xright = x$supports[which.max(x$box.qualities)] + 2*x$metrics$se,
-  #  ytop = 1e6,
-  #  col = "gray95")
-  #graphics::abline(v = x$supports[which.max(x$box.qualities)] - 2*x$metrics$se, lty = 2)
-  #graphics::abline(v = x$supports[which.max(x$box.qualities)] + 2*x$metrics$se, lty = 2)
+  if(x$optimal.box == "2se")
+    graphics::abline(h = max(x$box.qualities) - 2 * x$metrics$se, lty = 2)
 
   graphics::lines (
-    x$supports,
-    x$box.qualities
+    c(1, x$supports),
+    c(x$global.quality, x$box.qualities)
   )
   graphics::points (
-    x$supports,
-    x$box.qualities,
+    c(1, x$supports[1:best.box.idx]),
+    c(x$global.quality, x$box.qualities[1:best.box.idx]),
     col= "royalblue4", pch = 19, cex = 1, lty = "solid", lwd = 2)
+  graphics::points (
+    x$supports[-(1:best.box.idx)],
+    x$box.qualities[-(1:best.box.idx)],
+    col= "royalblue2", pch = 4, cex = 1, lty = "solid", lwd = 2)
+
+  print.names <- character(length = best.box.idx)
+
+  if(best.box.idx > 1)
+    for(i in 1:(best.box.idx-1)) {
+      if(x$rule.names[i] == x$rule.names[i + 1]) {
+        print.names[i] <- ""
+      } else {
+        print.names[i] <- paste(x$rule.names[i], x$rule.operators[i], x$rule.values[i])
+      }
+    }
+  print.names[best.box.idx] <- paste(x$rule.names[best.box.idx], x$rule.operators[best.box.idx], x$rule.values[best.box.idx])
+
   graphics::text (
-    x$supports,
-    x$box.qualities,
-    labels = c("", paste(x$rule.names, x$rule.operators, x$rule.values) ),
+    c(1, x$supports[1:best.box.idx]),
+    c(x$global.quality, x$box.qualities[1:best.box.idx]),
+    labels = c("", print.names),
     cex = 0.7, pos = 2, col = "orangered4", font = 2)
 }
 
@@ -897,12 +1011,12 @@ plot.prim.validate <- function(x, ...) {
 plot.prim.cover <- function(x, ...) {
 
   dat <- data.frame(t(sapply(x$covers, function(c) {
-    c( supports = c$cov.box.support / c$cov.support,
-       box.qualities = c$cov.box.quality)
+    c( supports = c$cover.box.N / c$cover.N,
+       box.qualities = c$cover.box.quality)
   })))
   dat <- rbind(dat, c(
-    supports = x$leftover$cov.support / x$covers[[length(x$covers)]]$cov.support,
-    box.qualities = x$leftover$cov.overall.quality
+    supports = x$leftover$cover.N / x$covers[[length(x$covers)]]$cover.N,
+    box.qualities = x$leftover$cover.global.quality
   ))
 
   graphics::par(bty = "l")
@@ -940,10 +1054,16 @@ plot.prim.cover <- function(x, ...) {
 #' @export
 #' @importFrom graphics par plot points text
 plot.prim.diversify <- function(x, ...) {
+
   dat <- data.frame(t(sapply(x$attempts, function(a) {
-    c( supports = a$att.box.support / x$support,
-       box.qualities = a$att.box.quality)
+    c( supports = a$final.box.N / x$N,
+       box.qualities = a$final.box.quality)
   })))
+
+  frontier.index <- x$frontier
+  frontier <- dat[frontier.index,]
+  dominated <- dat[-frontier.index,]
+
   graphics::par(bty = "l")
   graphics::plot (
     dat$supports,
@@ -952,15 +1072,27 @@ plot.prim.diversify <- function(x, ...) {
     xlab = "Support", ylab = "Box quality",
     main = "PRIM diversify result",
     ...)
+  graphics::lines (
+    x = frontier$supports,
+    y = frontier$box.qualities,
+    lwd = 2,
+    col = "ivory4"
+  )
   graphics::points (
-    dat$supports,
-    dat$box.qualities,
-    col= "royalblue4", pch = 19, cex = 1, lty = "solid", lwd = 2)
+    dominated$supports,
+    dominated$box.qualities,
+    col= "royalblue2", pch = 4, cex = 1, lty = "solid", lwd = 2)
+  graphics::points (
+    frontier$supports,
+    frontier$box.qualities,
+    col= "royalblue4", pch = 19, cex = 1.25, lty = "solid", lwd = 2)
   graphics::text (
-    dat$supports,
-    dat$box.qualities,
-    labels = paste("Attempt", 1 : length(x$attempts)),
-    cex = 0.7, pos = 1, col = "orangered4", font = 2)
+    frontier$supports,
+    frontier$box.qualities,
+    labels = frontier.index,
+    cex = 0.85, adj = -c(0.5,0.5), col = "orangered4", font = 2)
+
+
 }
 
 
@@ -992,12 +1124,12 @@ summary.prim.peel <- function(object, ..., round = TRUE, digits = 2) {
   cat("\n")
   best.box.idx <- which.max(object$box.qualities)
 
-  cat("  Set size: ", object$peel.support, "\n")
-  cat("  Set quality: ", round(object$peel.overall.quality, digits), "\n")
+  cat("  Original Set size: ", object$N, "\n")
+  cat("  Original Set quality: ", round(object$global.quality, digits), "\n")
   cat("\n")
   cat("  ============== BEST BOX ==============", "\n")
-  cat("  Box quality: ", round(object$box.qualities[best.box.idx], digits), "(", round(object$box.qualities[best.box.idx] / object$peel.overall.quality, digits), ") \n")
-  cat("  Box support: ", round(object$supports[best.box.idx], digits), " (", object$supports[best.box.idx] * object$peel.support, ") \n")
+  cat("  Box quality: ", round(object$box.qualities[best.box.idx], digits), "(", round(object$box.qualities[best.box.idx] / object$global.quality, digits), ") \n")
+  cat("  Box support: ", round(object$supports[best.box.idx], digits), " (", object$supports[best.box.idx] * object$N, ") \n")
   cat("\n")
   cat("  ================ RULES ===============", "\n")
   cat(" ", paste0(object$superrule, collapse = "\n  "))
@@ -1018,17 +1150,17 @@ summary.prim.validate <- function(object, ..., round = TRUE, digits = 2) {
   if(!round)  digits = 7
 
   cat("  ======================================", "\n")
-  cat("  ========== PRIM TEST RESULT ==========", "\n")
+  cat("  ======== PRIM VALIDATE RESULT ========", "\n")
   cat("  ======================================", "\n")
   cat("\n")
-  best.box.idx <- which.max(object$box.qualities)
+  best.box.idx <- object$best.box.idx
 
-  cat("  Original set size: ", object$validate.support, "\n")
-  cat("  Original set quality: ", round(object$validate.overall.quality, digits), "\n")
+  cat("  Original set size: ", object$N, "\n")
+  cat("  Original set quality: ", round(object$global.quality, digits), "\n")
   cat("\n")
   cat("  ============== BEST BOX ==============", "\n")
-  cat("  Box quality: ", round(object$box.qualities[best.box.idx], digits), "(", round(object$box.qualities[best.box.idx] / object$validate.overall.quality, digits), ") \n")
-  cat("  Box support: ", round(object$supports[best.box.idx], digits), " (", object$supports[best.box.idx] * object$validate.support, ") \n")
+  cat("  Box quality: ", round(object$box.qualities[best.box.idx], digits), "(", round(object$box.qualities[best.box.idx] / object$global.quality, digits), ") \n")
+  cat("  Box support: ", round(object$supports[best.box.idx], digits), " (", object$supports[best.box.idx] * object$N, ") \n")
   cat("\n")
   cat("  ================ RULES ===============", "\n")
   cat(" ", paste0(object$superrule, collapse = "\n  "))
@@ -1062,11 +1194,11 @@ summary.prim.cover <- function(object, ..., round = TRUE, digits = 2) {
     cat("\n")
     cat("  ======================================", "\n")
     cat("  ============== COVER", i,"===============", "\n")
-    cat("  |  Cover set size: ", x$cov.support, "\n")
-    cat("  |  Cover set quality: ", round(x$cov.overall.quality, digits), "\n")
+    cat("  |  Cover set size: ", x$cover.N, "\n")
+    cat("  |  Cover set quality: ", round(x$cover.global.quality, digits), "\n")
     cat("  |\n")
-    cat("  |  Box relative quality: ", round(x$cov.box.quality, digits), "(", round(x$cov.box.quality / x$cov.overall.quality, digits), ") \n")
-    cat("  |  Box relative support: ", round(x$cov.box.support / x$cov.support, digits) , " (", x$cov.box.support, ") \n")
+    cat("  |  Box relative quality: ", round(x$cover.box.quality, digits), "(", round(x$cover.box.quality / x$cover.global.quality, digits), ") \n")
+    cat("  |  Box relative support: ", round(x$cover.box.N / x$cover.N, digits) , " (", x$cover.box.N, ") \n")
     cat("\n")
     cat("  ================ RULES ===============", "\n")
     cat("  | ", paste0(x$superrule, collapse = "\n  |  "))
@@ -1079,8 +1211,8 @@ summary.prim.cover <- function(object, ..., round = TRUE, digits = 2) {
   cat("\n")
   cat("  ======================================", "\n")
   cat("  ============== LEFTOVER ==============", "\n")
-  cat("  |  Cover set size: ", x$cov.support, "\n")
-  cat("  |  Cover set quality: ", round(x$cov.overall.quality, digits), "\n")
+  cat("  |  Cover set size: ", x$cover.N, "\n")
+  cat("  |  Cover set quality: ", round(x$cover.global.quality, digits), "\n")
   cat("\n","\n","\n")
 
 }
@@ -1106,8 +1238,8 @@ summary.prim.diversify <- function(object, ..., round = TRUE, digits = 2) {
   cat("  |  Min support:", object$min.support, "\n")
   cat("  |  Train/test split:", object$train.fraction, "\n")
   cat("  |\n")
-  cat("  |  Set support: ", object$support, "\n")
-  cat("  |  Set quality: ", round(object$overall.quality, digits), "\n")
+  cat("  |  Set size: ", object$N, "\n")
+  cat("  |  Set quality: ", round(object$global.quality, digits), "\n")
   cat("\n")
   cat("  Scores:", "\n  | ")
   cat(paste0(
@@ -1117,15 +1249,17 @@ summary.prim.diversify <- function(object, ..., round = TRUE, digits = 2) {
       apply(formatC(round(object$scoreMatrix, 2), format = "f", digits = 2), 1, paste, collapse = "\t"))
     , collapse = "\n  |  ")
     )
-  cat("\n")
-  for(i in 1:length(object$attempts)) {
-    x <- object$attempts[[i]]
+  cat("\n\n\n")
+  cat("  Dominating attempts:","\n")
+  frontier <- sort(object$frontier)
+  for(i in seq_along(frontier)) {
+    x <- object$attempts[[frontier[i]]]
     cat("\n")
     cat("  ======================================", "\n")
-    cat("  ============= ATTEMPT", i,"==============", "\n")
+    cat("  ============= ATTEMPT", frontier[i],"==============", "\n")
     cat("  |  Score:", round(object$scores[i], digits), "\n")
-    cat("  |  Box quality: ", round(x$att.box.quality, digits), "(", round(x$att.box.quality / object$overall.quality, digits), ") \n")
-    cat("  |  Box support: ", round(x$att.box.support / object$support, digits) , " (", x$att.box.support, ") \n")
+    cat("  |  Box quality: ", round(x$final.box.quality, digits), "(", round(x$final.box.quality / object$global.quality, digits), ") \n")
+    cat("  |  Box support: ", round(x$final.box.N / object$N, digits) , " (", x$final.box.N, ") \n")
     cat("\n")
     cat("  ================ RULES ===============", "\n")
     cat("  | ", paste0(x$superrule, collapse = "\n  |  "))
@@ -1133,3 +1267,35 @@ summary.prim.diversify <- function(object, ..., round = TRUE, digits = 2) {
 
   }
 }
+
+#-------------------------------------------------------------------------------------------#
+################################### MISC HELPER FUNCTIONS ###################################
+#-------------------------------------------------------------------------------------------#
+
+#' @title Calculate a frontier of dominating points
+#' @description During the diversify process, we are really only interested in the attempts which dominate all others in performance.
+#' @param p.div An object of type "prim.diversify"
+#' @author William Huber & Jurian Baas
+#' @return A vector of indexes for the dominating points
+#' @seealso \url{https://stats.stackexchange.com/a/65157}
+quasi.convex.hull <- function(p.div) {
+
+  if(class(p.div) != "prim.diversify")
+    stop("Parameter not of class prim.diversify")
+
+  X <- data.frame(t(sapply(p.div$attempts, function(a) {
+    c( supports = a$final.box.N / p.div$N,
+       box.qualities = a$final.box.quality)
+  })))
+
+  i <- order(X[, 1], X[, 2], decreasing = TRUE)
+  y <- X[i, 2]
+  frontier <- which(cummax(y) <= y)
+  #
+  # Eliminate interior points along edges of the hull
+  #
+  y.0 <- y[frontier]
+  frontier <- frontier[c(TRUE, y.0[-1] != y.0[-length(y.0)])]
+  return(i[frontier])
+}
+

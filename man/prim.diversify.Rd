@@ -4,9 +4,10 @@
 \alias{prim.diversify}
 \title{PRIM diversify strategy}
 \usage{
-prim.diversify(formula, data, X, y, n, peeling.quantile, min.support,
-  max.peel = 0.1, train.fraction = 0.66, quality.function = base::mean,
-  plot = FALSE)
+prim.diversify(formula, data, X, y, n, peeling.quantile = 0.03,
+  min.support = 0.05, max.peel = 0.1, train.fraction = 0.66,
+  quality.function = base::mean, plot = FALSE, parallel = TRUE,
+  minimize = FALSE, optimal.box = c("best", "2se"))
 }
 \arguments{
 \item{formula}{Formula with a response and terms}
@@ -25,11 +26,17 @@ prim.diversify(formula, data, X, y, n, peeling.quantile, min.support,
 
 \item{max.peel}{Maximal size of a peel, as a fraction. Defaults to 0.1}
 
-\item{train.fraction}{Optional train-test split fraction used in validation, defaults to 0.66}
+\item{train.fraction}{Train-test split fraction used in validation, defaults to 0.66}
 
-\item{quality.function}{Optional setting for function to use for determining subset quality, defaults to mean}
+\item{quality.function}{Function to use for determining subset quality, defaults to mean}
 
-\item{plot}{Optional setting to plot intermediate results, defaults to false}
+\item{plot}{Plot intermediate results, defaults to false. Note that intermediate plotting is unavailable when running in parallel}
+
+\item{parallel}{Compute each run in parallel, defaults to TRUE. This will use all but one core. Note that intermediate plotting is unavailable when running in parallel}
+
+\item{minimize}{Should the quality be minimized? Same as setting the quality function to function(x){-quality.function(x)}. Defaults to FALSE}
+
+\item{optimal.box}{During validation, choose the box with the highest quality or a simpler box, two standard errors from the optimum}
 }
 \value{
 An S3 object of type prim.diversify
@@ -38,20 +45,23 @@ An S3 object of type prim.diversify
 Provide a (hopefully) diverse number of box definitions
 }
 \details{
-Because the final box depends on the data used, we re-run the PRIM peeling algorithm multiple times, each with a different random train/test split.
+Because the final box depends on the data used, we re-run the PRIM peeling algorithm multiple times, each with a different random train/test split. Each run is independent from the others, so this algorithm is run in parallel by default.
 }
 \examples{
   data(ames)
   p.div <- prim.diversify(
       SalePrice ~ . - PID - Order,
       data = ames,
-      n = 5,
-      peeling.quantile = 0.05,
-      min.support = 0.05,
-      plot = TRUE
+      n = 3,
+      plot = TRUE,
+      parallel = FALSE,
+      optimal.box = "best"
   )
+
+  \donttest{
   summary(p.div)
   plot(p.div)
+  }
 }
 \author{
 Jurian Baas
