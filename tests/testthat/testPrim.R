@@ -1,42 +1,52 @@
 library(subgroup.discovery)
 context("Patient Rule Induction Method")
 
-testthat::test_that("Test covering functionality on pima data set", {
 
-  data(pima)
+testthat::test_that("Test the data preparation phase", {
 
-  X <- pima[,-9]
-  y <- pima$class
+  data(credit)
+  noncompliant <- any(sapply(credit, function(x){!(is.numeric(x) | is.factor(x))}))
+  credit <- prim.data.prepare(credit)
+  compliant <- any(sapply(credit, function(x){!(is.numeric(x) | is.factor(x))}))
 
-  p.cov <- subgroup.discovery::prim.cover(X = X, y = y, peeling.quantile = 0.05, min.support = 0.1)
-
-  p.validate <- p.cov$covers[[1]]
-  p.leftover <- p.cov$leftover
-
-  expect_is(p.cov, "prim.cover")
-  expect_is(p.validate, "prim.validate")
-  expect_is(p.leftover, "prim.cover.leftover")
-
-  #expect_true(!is.unsorted(rev(sapply(p.cov$covers, function(x) x$cov.support))))
-
+  expect_true(noncompliant)
+  expect_false(compliant)
 })
 
-testthat::test_that("Test covering functionality on the pima data set, using the formula interface", {
+testthat::test_that("Test functionality on pima data set", {
 
   data(pima)
+  pima.sample <- 1:(0.75*nrow(pima))
+  pima <- prim.data.prepare(pima)
+  pima.model <- prim(class ~ ., data = pima[pima.sample,], peeling.quantile = 0.4, min.support = 0.4)
+  pima.predict <- predict(pima.model, pima[-pima.sample,])
 
-  p.cov <- subgroup.discovery::prim.cover(class ~ ., data = pima, peeling.quantile = 0.05, min.support = 0.1)
+  expect_is(pima.model, "prim.peel")
+  expect_is(pima.predict, "prim.predict")
 
-  p.validate <- p.cov$covers[[1]]
-  p.leftover <- p.cov$leftover
+  pima.model.idx <- prim.box.index(pima.model, pima)
+  pima.predict.idx <- prim.box.index(pima.predict, pima)
 
-  expect_is(p.cov, "prim.cover")
-  expect_is(p.validate, "prim.validate")
-  expect_is(p.leftover, "prim.cover.leftover")
+  expect_true(length(pima.model.idx) > 0)
+  expect_true(length(pima.predict.idx) > 0)
+  expect_true(length(pima.model.idx) <= length(pima.predict.idx))
+})
 
-  expect_is(p.cov$formula, "formula")
-  expect_identical(p.cov$formula, as.formula(class ~ .))
+testthat::test_that("Test functionality on ames data set, with lots of categorical data", {
 
-  #expect_true(!is.unsorted(rev(sapply(p.cov$covers, function(x) x$cov.support))))
+  data(ames)
+  ames.sample <- 1:(0.75*nrow(ames))
+  ames <- prim.data.prepare(ames)
+  ames.model <- prim(SalePrice ~ . - PID - Order, data = ames[ames.sample,], peeling.quantile = 0.1, min.support = 0.1)
+  ames.predict <- predict(ames.model, ames[-ames.sample,])
 
+  expect_is(ames.model, "prim.peel")
+  expect_is(ames.predict, "prim.predict")
+
+  ames.model.idx <- prim.box.index(ames.model, ames)
+  ames.predict.idx <- prim.box.index(ames.predict, ames)
+
+  expect_true(length(ames.model.idx) > 0)
+  expect_true(length(ames.predict.idx) > 0)
+  expect_true(length(ames.model.idx) <= length(ames.predict.idx))
 })
