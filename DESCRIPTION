@@ -1,7 +1,7 @@
 Package: subgroup.discovery
 Type: Package
 Title: Subgroup Discovery and Bump Hunting
-Version: 0.3.0
+Version: 0.3.1
 Authors@R: c(
           person(given = "Jurian", family = "Baas", email = "j.baas@uu.nl", role = c("aut", "cre", "cph")),
           person(given = "Ad", family ="Feelders", email = "a.j.feelders@uu.nl", role = c("ctb")))
@@ -23,12 +23,12 @@ Date: 2020-01-27
 Suggests: testthat (>= 2.1.1)
 Imports: Rcpp (>= 1.0.3), RcppParallel (>= 4.4.4)
 LinkingTo: Rcpp, RcppParallel, BH
-SystemRequirements: GNU make
+SystemRequirements: GNU make, C++11
 Language: en-US
 NeedsCompilation: yes
-Packaged: 2020-02-03 15:15:19 UTC; jbaas
+Packaged: 2020-02-06 12:17:35 UTC; juria
 Author: Jurian Baas [aut, cre, cph],
   Ad Feelders [ctb]
 Maintainer: Jurian Baas <j.baas@uu.nl>
 Repository: CRAN
-Date/Publication: 2020-02-03 16:40:02 UTC
+Date/Publication: 2020-02-09 14:10:06 UTC

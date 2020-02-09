@@ -28,10 +28,7 @@
 #include <RcppParallel.h>
 #include <boost/dynamic_bitset.hpp>
 
-using namespace RcppParallel;
 using namespace Rcpp;
-using namespace std;
-using namespace boost;
 
 static const int COL_NUMERIC = 0;
 static const int COL_CATEGORICAL = 1;
@@ -40,46 +37,83 @@ static const int BOX_NUM_LEFT = 0;
 static const int BOX_NUM_RIGHT = 1;
 static const int BOX_CATEGORY = 2;
 
-struct SubBox {
-  vector<int> remove;
+struct Peel {
+
+  bool valid;
   int col;
+  int type;
   double value;
   double quality;
   double support;
-  int type;
+  std::vector<int> remove;
 
-  void applyBox(const NumericMatrix& M, dynamic_bitset<>& mask) const;
-  bool isBetterThan(const SubBox& cmp) const;
+  Peel()
+  : valid(false),
+    col(0),
+    type(0),
+    value(0),
+    quality(0),
+    support(0),
+    remove(std::vector<int>()) {};
+
+  Peel(
+    int col,
+    int type)
+  : valid(false),
+    col(col),
+    type(type),
+    value(0),
+    quality(0),
+    support(0),
+    remove(std::vector<int>()) {};
+
+  Peel(
+    bool valid,
+    int col,
+    int type,
+    double value,
+    double quality,
+    double support,
+    std::vector<int> remove)
+  : valid(valid),
+    col(col),
+    type(type),
+    value(value),
+    quality(quality),
+    support(support),
+    remove(remove) {};
+
+  void apply(const NumericMatrix& M, boost::dynamic_bitset<>& mask) const;
+  bool isBetterThan(const Peel& cmp) const;
   List toList() const;
-  static SubBox fromList(List list);
+  static Peel fromList(List list);
 };
 
-struct ColWorker : public Worker {
+struct ColWorker : public RcppParallel::Worker {
 
-  const RMatrix<double>& M;
-  const RVector<double>& y;
-  const RVector<int>& colTypes;
-  const map<int, int>& colCats;
-  const map<int, IntegerVector>& colOrders;
+  const RcppParallel::RMatrix<double>& M;
+  const RcppParallel::RVector<double>& y;
+  const RcppParallel::RVector<int>& colTypes;
+  const std::map<int, int>& colCats;
+  const std::map<int, IntegerVector>& colOrders;
   const double& alpha;
   const double& minSup;
   const int& masked;
-  const dynamic_bitset<>& mask;
+  const boost::dynamic_bitset<>& mask;
 
-  bool subBoxFound;
-  SubBox bestSubBox;
+  Peel bestPeel = {};
 
   // constructors
   ColWorker (
-      const RMatrix<double>& M,
-      const RVector<double>& y,
-      const RVector<int>& colTypes,
-      const map<int, int>& colCats,
-      const map<int, IntegerVector>& colOrders,
+      const RcppParallel::RMatrix<double>& M,
+      const RcppParallel::RVector<double>& y,
+      const RcppParallel::RVector<int>& colTypes,
+      const std::map<int, int>& colCats,
+      const std::map<int, IntegerVector>& colOrders,
       const double& alpha,
       const double& minSup,
       const int& masked,
-      const dynamic_bitset<>& mask)
+      const boost::dynamic_bitset<>& mask)
     : M(M),
       y(y),
       colTypes(colTypes),
@@ -88,8 +122,7 @@ struct ColWorker : public Worker {
       alpha(alpha),
       minSup(minSup),
       masked(masked),
-      mask(mask),
-      subBoxFound(false) {};
+      mask(mask) {};
 
   ColWorker(const ColWorker& cw, RcppParallel::Split)
     : M(cw.M),
@@ -101,13 +134,12 @@ struct ColWorker : public Worker {
       minSup(cw.minSup),
       masked(cw.masked),
       mask(cw.mask),
-      subBoxFound(cw.subBoxFound),
-      bestSubBox(cw.bestSubBox) {};
+      bestPeel(cw.bestPeel) {};
 
   void operator()(size_t begin, size_t end);
   void join(const ColWorker& cw);
-  SubBox findNumCandidate(const int& colId);
-  SubBox findCatCandidate(const int& colId);
+  Peel findNumCandidate(const int& colId);
+  Peel findCatCandidate(const int& colId);
 };
 
 #endif

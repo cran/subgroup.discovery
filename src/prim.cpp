@@ -27,17 +27,14 @@
 #include "prim.h"
 #include "mapreduce.h"
 
-using namespace RcppParallel;
 using namespace Rcpp;
-using namespace std;
-using namespace boost;
 
 IntegerVector sortIndex(const NumericMatrix::ConstColumn& col) {
   IntegerVector index(col.size());
   for (int i = 0 ; i != index.size() ; i++) {
     index[i] = i;
   }
-  sort(index.begin(), index.end(),
+  std::sort(index.begin(), index.end(),
        [&](const int& a, const int& b) {
          return (col[a] < col[b]);
        }
@@ -49,20 +46,20 @@ int countCategories(const NumericMatrix::ConstColumn& col) {
   return unique(col).length();
 }
 
-List findSubBoxes(
-    const RMatrix<double>& M,
-    const RVector<double>& y,
-    const RVector<int>& colTypes,
-    const map<int, int>& colCats,
-    const map<int, IntegerVector>& colOrders,
+List findPeels(
+    const RcppParallel::RMatrix<double>& M,
+    const RcppParallel::RVector<double>& y,
+    const RcppParallel::RVector<int>& colTypes,
+    const std::map<int, int>& colCats,
+    const std::map<int, IntegerVector>& colOrders,
     const double& alpha,
     const double& minSup) {
 
   const size_t N = M.nrow();
-  dynamic_bitset<> mask(N);
+  boost::dynamic_bitset<> mask(N);
   int masked = 0;
 
-  bool subBoxFound;
+  bool peelFound;
 
   List peelSteps = List::create();
 
@@ -81,23 +78,24 @@ List findSubBoxes(
         masked,
         mask);
 
-    parallelReduce(0, M.ncol(), cw);
+    RcppParallel::parallelReduce(0, M.ncol(), cw);
 
-    subBoxFound = cw.subBoxFound;
+    // If nothing valid was found, the peel returned is invalid
+    peelFound = cw.bestPeel.valid;
 
-    if(subBoxFound) {
-      SubBox bestSubBox = cw.bestSubBox;
+    if(peelFound) {
+      Peel bestPeel = cw.bestPeel;
 
-      // Add the new subbox to the mask
-      for(size_t i = 0; i < bestSubBox.remove.size(); i++) {
-        mask.set(bestSubBox.remove[i]);
+      // Add the new peel to the mask
+      for(size_t i = 0; i < bestPeel.remove.size(); i++) {
+        mask.set(bestPeel.remove[i]);
       }
 
-      masked += bestSubBox.remove.size();
-      peelSteps.push_back(bestSubBox.toList());
+      masked += bestPeel.remove.size();
+      peelSteps.push_back(bestPeel.toList());
     }
 
-  } while (subBoxFound);
+  } while (peelFound);
 
   IntegerVector finalBoxIndex;
   for(size_t i = 0; i < M.nrow(); i++) {
@@ -115,8 +113,8 @@ List peelCpp (
     const double& alpha,
     const double& minSup) {
 
-  map<int, int> colCats;
-  map<int, IntegerVector> colOrders;
+  std::map<int, int> colCats;
+  std::map<int, IntegerVector> colOrders;
 
   // Pre-process the data here,
   // for categorical columns, we need to know the number of categories
@@ -139,10 +137,10 @@ List peelCpp (
     }
   }
 
-  return findSubBoxes(
-    RMatrix<double>(M),
-    RVector<double>(y),
-    RVector<int>(colTypes),
+  return findPeels(
+    RcppParallel::RMatrix<double>(M),
+    RcppParallel::RVector<double>(y),
+    RcppParallel::RVector<int>(colTypes),
     colCats,
     colOrders,
     alpha,
@@ -157,7 +155,7 @@ List predictCpp (
 
   const size_t N = M.nrow();
   int masked = 0;
-  dynamic_bitset<> mask(N);
+  boost::dynamic_bitset<> mask(N);
 
   const double minSup = peelResult["min.support"];
   const List peelSteps = peelResult["peels"];
@@ -173,7 +171,7 @@ List predictCpp (
     double quality = 0;
 
     int k = 1;
-    vector<int> remove;
+    std::vector<int> remove;
 
     NumericMatrix::ConstColumn column = M( _, colId);
 
@@ -226,7 +224,7 @@ List predictCpp (
     // We have dropped under the minimum support
     if(support < minSup) break;
 
-    // Add the new subbox to the mask
+    // Add the new peel to the mask
     for(size_t i = 0; i < remove.size(); i++) {
       mask.set(remove[i]);
     }
@@ -237,7 +235,8 @@ List predictCpp (
         _["type"] = type,
         _["value"] = value,
         _["quality"] = quality,
-        _["support"] = support
+        _["support"] = support,
+        _["valid"] = true
       )
     );
   }
@@ -257,7 +256,7 @@ List simplifyCpp(
 
     const size_t colType = colTypes[col];
     bool colUsed = false;
-    List bestBoxes = List::create();
+    List bestPeels = List::create();
 
     if(colType == COL_NUMERIC) {
 
@@ -274,26 +273,26 @@ List simplifyCpp(
 
         if(_boxType == BOX_NUM_LEFT) {
 
-          if(bestBoxes.containsElementNamed("left")) {
-            const List curBest = bestBoxes["left"];
+          if(bestPeels.containsElementNamed("left")) {
+            const List curBest = bestPeels["left"];
             const double value = curBest["value"];
             if(_value > value) {
-              bestBoxes["left"] = peel;
+              bestPeels["left"] = peel;
             }
           } else {
-            bestBoxes["left"] = peel;
+            bestPeels["left"] = peel;
           }
 
         } else if (_boxType == BOX_NUM_RIGHT) {
 
-          if(bestBoxes.containsElementNamed("right")) {
-            const List curBest = bestBoxes["right"];
+          if(bestPeels.containsElementNamed("right")) {
+            const List curBest = bestPeels["right"];
             const double value = curBest["value"];
             if(_value < value) {
-              bestBoxes["right"] = peel;
+              bestPeels["right"] = peel;
             }
           } else {
-            bestBoxes["right"] = peel;
+            bestPeels["right"] = peel;
           }
         }
       }
@@ -307,15 +306,15 @@ List simplifyCpp(
         if(_col != col) continue;
 
         colUsed = true;
-        bestBoxes.push_back(peel);
+        bestPeels.push_back(peel);
       }
 
     }
 
     if(colUsed) {
-      const size_t s = bestBoxes.size();
+      const size_t s = bestPeels.size();
       for(size_t boxIdx = 0; boxIdx < s; boxIdx++) {
-        compressedBoxes.push_back(bestBoxes[boxIdx]);
+        compressedBoxes.push_back(bestPeels[boxIdx]);
       }
     }
   }
@@ -329,15 +328,15 @@ IntegerVector indexCpp(
   const size_t& boxId) {
 
   const size_t N = M.nrow();
-  dynamic_bitset<> mask(N);
+  boost::dynamic_bitset<> mask(N);
 
   for(size_t i = 0; i <= boxId; i++) {
 
     checkUserInterrupt();
 
-    const List boxList = boxes[i];
-    const SubBox box = SubBox::fromList(boxList);
-    box.applyBox(M, mask);
+    const List peels = boxes[i];
+    const Peel peel = Peel::fromList(peels);
+    peel.apply(M, mask);
   }
 
   IntegerVector index;

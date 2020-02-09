@@ -20,19 +20,15 @@
 // [[Rcpp::depends(RcppParallel)]]
 
 #include <vector>
-#include <map>
 #include <Rcpp.h>
 #include <RcppParallel.h>
 #include <boost/dynamic_bitset.hpp>
 #include "quantile.h"
 #include "mapreduce.h"
 
-using namespace RcppParallel;
 using namespace Rcpp;
-using namespace std;
-using namespace boost;
 
-void SubBox::applyBox(const NumericMatrix& M, dynamic_bitset<>& mask) const {
+void Peel::apply(const NumericMatrix& M, boost::dynamic_bitset<>& mask) const {
 
   const size_t N = M.nrow();
   NumericMatrix::ConstColumn column = M(_, this->col);
@@ -56,7 +52,17 @@ void SubBox::applyBox(const NumericMatrix& M, dynamic_bitset<>& mask) const {
   }
 }
 
-bool SubBox::isBetterThan(const SubBox& cmp) const {
+bool Peel::isBetterThan(const Peel& cmp) const {
+
+  // When we choose between two peels we always choose
+  // a valid one over an invalid one. If both are invalid,
+  // then the peel is not "better".
+  // If both are valid, choose the peel with the highest
+  // quality and break ties on support
+
+  if(this->valid && !cmp.valid) return true;
+  if(!this->valid && cmp.valid) return false;
+  if(!this->valid && !cmp.valid) return false;
 
   bool q = this->quality > cmp.quality;
   bool e = this->quality == cmp.quality;
@@ -65,38 +71,40 @@ bool SubBox::isBetterThan(const SubBox& cmp) const {
   return q || (e && s);
 }
 
-List SubBox::toList() const {
+List Peel::toList() const {
   return List::create(
     _["column"] = this->col,
     _["value"] = this->value,
     _["quality"] = this->quality,
     _["support"] = this->support,
-    _["type"] = this->type
+    _["type"] = this->type,
+    _["valid"] = this->valid
   );
 }
 
-SubBox SubBox::fromList(List list) {
-  vector<int> rm;
-  SubBox box = {
-    rm,
-    list["column"],
-    list["value"],
-    list["quality"],
-    list["support"],
-    list["type"]
+Peel Peel::fromList(List list) {
+
+  Peel box = {
+    (bool)list["valid"],
+    (int)list["column"],
+    (int)list["type"],
+    (double)list["value"],
+    (double)list["quality"],
+    (double)list["support"],
+    std::vector<int>()
   };
   return box;
 }
 
-SubBox ColWorker::findNumCandidate(const int& colId) {
+Peel ColWorker::findNumCandidate(const int& colId) {
 
-  const RMatrix<double>::Column col = M.column(colId);
+  const RcppParallel::RMatrix<double>::Column col = M.column(colId);
   const int N = M.nrow();
 
-  const double leftQuantile = quantile7(col, RVector<int>(colOrders.find(colId)->second), alpha, N, masked, mask);
-  const double rightQuantile = quantile7(col, RVector<int>(colOrders.find(colId)->second), 1-alpha, N, masked, mask);
+  const double leftQuantile = quantile7(col, RcppParallel::RVector<int>(colOrders.find(colId)->second), alpha, N, masked, mask);
+  const double rightQuantile = quantile7(col, RcppParallel::RVector<int>(colOrders.find(colId)->second), 1-alpha, N, masked, mask);
 
-  vector<int> leftRemove, rightRemove;
+  std::vector<int> leftRemove, rightRemove;
   double leftMean = 0, rightMean = 0;
   int leftK = 1, rightK = 1;
 
@@ -123,56 +131,60 @@ SubBox ColWorker::findNumCandidate(const int& colId) {
   const int rightRemoveCount = rightRemove.size();
   const int rightKeepCount = N - masked - rightRemove.size();
 
-  SubBox left, right;
-  bool leftFound = false, rightFound = false;
-  const double leftSupport = leftKeepCount / (double)N;
+  // Create empty invalid boxes for both left and right
+  Peel left = {
+    colId,
+    BOX_NUM_LEFT
+  };
 
+  Peel right = {
+    colId,
+    BOX_NUM_RIGHT
+  };
+
+  const double leftSupport = leftKeepCount / (double)N;
   if(leftRemoveCount > 0 && leftSupport >= minSup) {
-    leftFound = true;
-    left = {
-      leftRemove,
-      colId,
-      leftQuantile,
-      leftMean,
-      leftSupport,
-      BOX_NUM_LEFT
-    };
+    left.valid = true;
+    left.value = leftQuantile;
+    left.quality = leftMean;
+    left.support = leftSupport;
+    left.remove = leftRemove;
   }
 
   const double rightSupport = rightKeepCount / (double)N;
   if(rightRemoveCount > 0 && rightSupport >= minSup) {
-    rightFound = true;
-    right = {
-      rightRemove,
-      colId,
-      rightQuantile,
-      rightMean,
-      rightSupport,
-      BOX_NUM_RIGHT
-    };
+    right.valid = true;
+    right.value = rightQuantile;
+    right.quality = rightMean;
+    right.support = rightSupport;
+    right.remove = rightRemove;
   }
 
-  if(!leftFound && !rightFound) throw 0;
-  if(!leftFound && rightFound) return right;
-  if(leftFound && !rightFound) return left;
+  // Note that we might still return an invalid box here
   return left.isBetterThan(right) ? left : right;
 }
 
-SubBox ColWorker::findCatCandidate(const int& colId) {
+Peel ColWorker::findCatCandidate(const int& colId) {
 
-  const RMatrix<double>::Column col = M.column(colId);
+  const RcppParallel::RMatrix<double>::Column col = M.column(colId);
   const int nCats = colCats.find(colId)->second;
   const int N = M.nrow();
 
-  SubBox bestSubBox, newSubBox;
-  bool boxFound = false;
+  // Create a default invalid box
+  Peel box = {
+    colId,
+    BOX_CATEGORY
+  };
+
+  double bestSupport = 0;
+  double bestQuality = 0;
 
   // Calculate the quality of each category
   for(int c = 0; c < nCats; c++) {
 
     double quality = 0;
 
-    vector<int> remove;
+    std::vector<int> remove;
 
     int k = 1;
     for(size_t i = 0; i < col.size(); i++) {
@@ -192,63 +204,58 @@ SubBox ColWorker::findCatCandidate(const int& colId) {
 
     const double removeFraction = remove.size() / (double) (remove.size() + keepSize);
     const double support = keepSize / (double)N;
+
     if(removeFraction < alpha && support >= minSup) {
 
-      newSubBox = {
-        remove,
-        colId,
-        (double) c,
-        quality,
-        support,
-        BOX_CATEGORY
-      };
+      if(quality > bestQuality || (quality == bestQuality && support > bestSupport) ) {
 
-      if(!boxFound || newSubBox.isBetterThan(bestSubBox)) {
-        bestSubBox = newSubBox;
-        boxFound = true;
+        box.valid = true;
+        box.value = (double) c;
+        box.quality = quality;
+        box.support = support;
+        box.remove = remove;
+
+        bestSupport = support;
+        bestQuality = quality;
       }
     }
   }
 
-  if(!boxFound) throw 0;
-  return bestSubBox;
+  // Note that we might still return an invalid box here
+  return box;
 }
 
 void ColWorker::operator()(size_t begin, size_t end) {
 
-  SubBox newSubBox;
-
+  // We start with an invalid default box
   for(size_t i = begin; i < end; i++) {
 
-    try {
+    if(colTypes[i] == COL_NUMERIC) {
 
-      if(colTypes[i] == COL_NUMERIC) {
-        newSubBox = findNumCandidate(i);
-      }
-      else if(colTypes[i] == COL_CATEGORICAL) {
-        newSubBox = findCatCandidate(i);
-      }
-      else {
-        stop("Invalid type for column %i", i+1);
+      Peel newPeel = findNumCandidate(i);
+
+      // At this point the new box might be invalid!
+      // Note that a valid box is always "better" than an invalid box
+      if(newPeel.valid && newPeel.isBetterThan(this->bestPeel)) {
+        this->bestPeel = newPeel;
       }
 
-      if(!subBoxFound || newSubBox.isBetterThan(bestSubBox)) {
+    } else {
 
-        bestSubBox = newSubBox;
-        subBoxFound = true;
+      Peel newPeel = findCatCandidate(i);
+
+      // At this point the new box might be invalid!
+      // Note that a valid box is always "better" than an invalid box
+      if(newPeel.valid && newPeel.isBetterThan(this->bestPeel)) {
+        this->bestPeel = newPeel;
       }
-
-    } catch(int e) {
-      // No subBox was found for this column
     }
   }
-
 }
 
 void ColWorker::join(const ColWorker& cw) {
-
-  if(cw.subBoxFound && (!subBoxFound || cw.bestSubBox.isBetterThan(bestSubBox))) {
-    bestSubBox = cw.bestSubBox;
-    subBoxFound = true;
+  // Note that a valid box is always "better" than an invalid box
+  if(cw.bestPeel.isBetterThan(this->bestPeel)) {
+    this->bestPeel = cw.bestPeel;
   }
 }
